@@ -55,7 +55,8 @@ GPT4O_MINI_API_KEYS = [
 GPT4O_MINI_BASE_URL = "https://api.deepbricks.ai/v1/"
 
 # 阿里云DashScope API配置
-DASHSCOPE_API_KEY = "sk-4f82c6e2097440f8adb2ef688c7c7551"
+DASHSCOPE_API_KEY = "sk-3f579673c4724c06a680f80246c2c90e"
+DASHSCOPE_BACKUP_API_KEY = "sk-787d18eec7c2403ca5bcf4595cfff038"
 
 # API密钥轮询计数器
 _api_key_counter = 0
@@ -297,12 +298,13 @@ def validate_logo_quality(image):
         return False, f"Logo质量验证出错: {str(e)}"
 
 def generate_vector_image_with_retry(prompt, max_retries=3, background_color=None):
-    """带重试机制的logo生成函数"""
-    for attempt in range(max_retries):
-        print(f"Logo生成尝试 {attempt + 1}/{max_retries}")
+    """带重试机制的logo生成函数，支持主备API切换"""
+    # 先尝试主API（前2次尝试）
+    for attempt in range(min(2, max_retries)):
+        print(f"Logo生成尝试 {attempt + 1}/{max_retries} (使用主API)")
         
-        # 调用原始生成函数
-        logo_image = generate_vector_image_single_attempt(prompt, background_color)
+        # 调用主API生成函数
+        logo_image = generate_vector_image_single_attempt(prompt, background_color, use_backup=False)
         
         if logo_image is not None:
             # 验证logo质量
@@ -310,21 +312,48 @@ def generate_vector_image_with_retry(prompt, max_retries=3, background_color=Non
             print(f"Logo质量验证结果: {validation_message}")
             
             if is_valid:
-                print(f"Logo生成成功，第{attempt + 1}次尝试")
+                print(f"Logo生成成功，第{attempt + 1}次尝试 (主API)")
                 return logo_image
             else:
                 print(f"Logo质量不合格: {validation_message}，准备重试")
                 if attempt < max_retries - 1:
                     time.sleep(1)  # 等待1秒后重试
         else:
-            print(f"Logo生成失败，第{attempt + 1}次尝试")
+            print(f"Logo生成失败，第{attempt + 1}次尝试 (主API)")
             if attempt < max_retries - 1:
                 time.sleep(2)  # 等待2秒后重试
     
-    print(f"Logo生成失败，已尝试{max_retries}次")
+    # 如果主API失败，尝试备用API（剩余的尝试次数）
+    remaining_attempts = max_retries - 2
+    if remaining_attempts > 0:
+        print("主API尝试失败，切换到备用API")
+        for attempt in range(remaining_attempts):
+            print(f"Logo生成尝试 {attempt + 3}/{max_retries} (使用备用API)")
+            
+            # 调用备用API生成函数
+            logo_image = generate_vector_image_single_attempt(prompt, background_color, use_backup=True)
+            
+            if logo_image is not None:
+                # 验证logo质量
+                is_valid, validation_message = validate_logo_quality(logo_image)
+                print(f"Logo质量验证结果: {validation_message}")
+                
+                if is_valid:
+                    print(f"Logo生成成功，第{attempt + 3}次尝试 (备用API)")
+                    return logo_image
+                else:
+                    print(f"Logo质量不合格: {validation_message}，准备重试")
+                    if attempt < remaining_attempts - 1:
+                        time.sleep(1)  # 等待1秒后重试
+            else:
+                print(f"Logo生成失败，第{attempt + 3}次尝试 (备用API)")
+                if attempt < remaining_attempts - 1:
+                    time.sleep(2)  # 等待2秒后重试
+    
+    print(f"Logo生成失败，已尝试{max_retries}次（主API: 2次，备用API: {remaining_attempts}次）")
     return None
 
-def generate_vector_image_single_attempt(prompt, background_color=None):
+def generate_vector_image_single_attempt(prompt, background_color=None, use_backup=False):
     """单次logo生成尝试"""
     # 构建矢量图logo专用的提示词
     vector_style_prompt = f"""创建一个矢量风格的logo设计: {prompt}
@@ -344,13 +373,23 @@ def generate_vector_image_single_attempt(prompt, background_color=None):
     13. 确保logo有丰富的细节和多种颜色
     14. 避免生成纯色或过于简单的图案"""
     
+    # 选择API key和模型
+    if use_backup:
+        api_key = DASHSCOPE_BACKUP_API_KEY
+        model = "wanx2.0-t2i-turbo"
+        print(f'----使用备用DashScope API生成矢量logo，模型: {model}----')
+    else:
+        api_key = DASHSCOPE_API_KEY
+        model = "wanx2.1-t2i-turbo"
+        print(f'----使用主DashScope API生成矢量logo，模型: {model}----')
+    
     # 优先使用DashScope API
     if DASHSCOPE_AVAILABLE:
         try:
-            print(f'----使用DashScope生成矢量logo，提示词: {vector_style_prompt}----')
+            print(f'提示词: {vector_style_prompt}')
             rsp = ImageSynthesis.call(
-                api_key=DASHSCOPE_API_KEY,
-                model="wanx2.0-t2i-turbo",
+                api_key=api_key,
+                model=model,
                 prompt=vector_style_prompt,
                 n=1,
                 size='1024*1024'
