@@ -234,9 +234,98 @@ def get_ai_design_suggestions(user_preferences=None):
     except Exception as e:
         return {"error": f"Error getting AI design suggestions: {str(e)}"}
 
-def generate_vector_image(prompt, background_color=None):
-    """Generate a vector-style logo with transparent background using DashScope API"""
+def validate_logo_quality(image):
+    """验证logo质量，检查是否为纯色或无效图像"""
+    if image is None:
+        return False, "Logo图像为空"
     
+    try:
+        # 转换为RGBA模式进行分析
+        img_rgba = image.convert("RGBA")
+        width, height = img_rgba.size
+        
+        # 检查图像尺寸是否合理
+        if width < 50 or height < 50:
+            return False, "Logo尺寸过小"
+        
+        # 获取所有像素数据
+        pixels = list(img_rgba.getdata())
+        
+        # 统计不同颜色的数量
+        unique_colors = set()
+        non_transparent_pixels = 0
+        
+        for pixel in pixels:
+            r, g, b, a = pixel
+            if a > 50:  # 非透明像素
+                non_transparent_pixels += 1
+                unique_colors.add((r, g, b))
+        
+        # 检查是否有足够的非透明像素
+        if non_transparent_pixels < (width * height * 0.05):  # 至少5%的像素应该是非透明的
+            return False, "Logo内容过少，可能生成失败"
+        
+        # 检查颜色多样性
+        if len(unique_colors) < 2:
+            return False, "Logo颜色过于单一，可能为纯色图像"
+        
+        # 检查是否为纯白色或纯黑色图像
+        dominant_colors = {}
+        for r, g, b in unique_colors:
+            color_key = (r, g, b)
+            dominant_colors[color_key] = dominant_colors.get(color_key, 0) + 1
+        
+        # 找到最主要的颜色
+        if dominant_colors:
+            most_common_color = max(dominant_colors, key=dominant_colors.get)
+            most_common_count = dominant_colors[most_common_color]
+            
+            # 如果某种颜色占比超过90%，可能是纯色图像
+            if most_common_count > non_transparent_pixels * 0.9:
+                r, g, b = most_common_color
+                # 检查是否为纯白色或接近白色
+                if r > 240 and g > 240 and b > 240:
+                    return False, "Logo主要为白色，可能生成失败"
+                # 检查是否为纯黑色或接近黑色
+                if r < 15 and g < 15 and b < 15:
+                    return False, "Logo主要为黑色，可能生成失败"
+        
+        print(f"Logo质量验证通过: 尺寸{width}x{height}, 非透明像素{non_transparent_pixels}, 颜色种类{len(unique_colors)}")
+        return True, "Logo质量良好"
+        
+    except Exception as e:
+        return False, f"Logo质量验证出错: {str(e)}"
+
+def generate_vector_image_with_retry(prompt, max_retries=3, background_color=None):
+    """带重试机制的logo生成函数"""
+    for attempt in range(max_retries):
+        print(f"Logo生成尝试 {attempt + 1}/{max_retries}")
+        
+        # 调用原始生成函数
+        logo_image = generate_vector_image_single_attempt(prompt, background_color)
+        
+        if logo_image is not None:
+            # 验证logo质量
+            is_valid, validation_message = validate_logo_quality(logo_image)
+            print(f"Logo质量验证结果: {validation_message}")
+            
+            if is_valid:
+                print(f"Logo生成成功，第{attempt + 1}次尝试")
+                return logo_image
+            else:
+                print(f"Logo质量不合格: {validation_message}，准备重试")
+                if attempt < max_retries - 1:
+                    time.sleep(1)  # 等待1秒后重试
+        else:
+            print(f"Logo生成失败，第{attempt + 1}次尝试")
+            if attempt < max_retries - 1:
+                time.sleep(2)  # 等待2秒后重试
+    
+    print(f"Logo生成失败，已尝试{max_retries}次")
+    return None
+
+def generate_vector_image_single_attempt(prompt, background_color=None):
+    """单次logo生成尝试"""
     # 构建矢量图logo专用的提示词
     vector_style_prompt = f"""创建一个矢量风格的logo设计: {prompt}
     要求:
@@ -251,9 +340,9 @@ def generate_vector_image(prompt, background_color=None):
     9. 矢量插画风格，扁平化设计
     10. 重要：背景必须完全透明，不能有任何颜色填充
     11. 请生成PNG格式的透明背景图标
-    12. 图标应该是独立的，没有任何背景元素"""
-    
-
+    12. 图标应该是独立的，没有任何背景元素
+    13. 确保logo有丰富的细节和多种颜色
+    14. 避免生成纯色或过于简单的图案"""
     
     # 优先使用DashScope API
     if DASHSCOPE_AVAILABLE:
@@ -282,24 +371,27 @@ def generate_vector_image(prompt, background_color=None):
                         print(f"背景透明化处理完成")
                         return img_processed
                     else:
-                        st.error(f"下载图像失败, 状态码: {image_resp.status_code}")
+                        print(f"下载图像失败, 状态码: {image_resp.status_code}")
+                        return None
             else:
                 print('DashScope调用失败, status_code: %s, code: %s, message: %s' %
                       (rsp.status_code, rsp.code, rsp.message))
-                st.error(f"DashScope API调用失败: {rsp.message}")
+                return None
                 
         except Exception as e:
-            st.error(f"DashScope API调用错误: {e}")
             print(f"DashScope错误: {e}")
+            return None
     
-    # 如果DashScope不可用，直接返回None
+    # 如果DashScope不可用，返回None
     if not DASHSCOPE_AVAILABLE:
-        st.error("DashScope API不可用，无法生成logo。请确保已正确安装dashscope库。")
+        print("DashScope API不可用，无法生成logo")
         return None
     
-    # DashScope失败时也直接返回None，不使用备选方案
-    st.error("DashScope API调用失败，无法生成logo。请检查网络连接或API密钥。")
     return None
+
+def generate_vector_image(prompt, background_color=None):
+    """Generate a vector-style logo with transparent background using DashScope API with retry mechanism"""
+    return generate_vector_image_with_retry(prompt, max_retries=3, background_color=background_color)
 
 def change_shirt_color(image, color_hex, apply_texture=False, fabric_type=None):
     """Change T-shirt color with optional fabric texture"""
@@ -582,8 +674,11 @@ def generate_complete_design(design_prompt, variation_id=None):
         # 2. 生成Logo
         logo_description = design_suggestions.get("logo", "")
         logo_image = None
+        logo_generation_attempts = 0
         
         if logo_description:
+            print(f"开始生成Logo: {logo_description}")
+            
             # 修改Logo提示词，生成透明背景的矢量图logo
             logo_prompt = f"""Create a professional vector logo design: {logo_description}. 
             Requirements: 
@@ -596,10 +691,19 @@ def generate_complete_design(design_prompt, variation_id=None):
             7. IMPORTANT: Create ONLY the logo graphic itself
             8. NO META REFERENCES - do not show the logo applied to anything
             9. Design should be a standalone graphic symbol/icon only
-            10. CRITICAL: Clean vector art style with crisp lines and solid colors"""
+            10. CRITICAL: Clean vector art style with crisp lines and solid colors
+            11. Ensure rich details and multiple colors to avoid solid color patterns
+            12. Create distinctive and recognizable graphic elements"""
             
-            # 生成透明背景的矢量logo
+            # 生成透明背景的矢量logo（已包含重试机制）
             logo_image = generate_vector_image(logo_prompt)
+            
+            if logo_image is None:
+                print(f"Logo生成失败: {logo_description}")
+                # 如果logo生成失败，我们仍然继续生成设计，但会在返回信息中标记
+                logo_generation_attempts = 3  # 标记已尝试生成但失败
+            else:
+                print(f"Logo生成成功: {logo_description}")
         
         # 最终设计 - 不添加文字
         final_design = colored_shirt
@@ -613,6 +717,8 @@ def generate_complete_design(design_prompt, variation_id=None):
             "color": {"hex": color_hex, "name": color_name},
             "fabric": fabric_type,
             "logo": logo_description,
+            "logo_generated": logo_image is not None,
+            "logo_attempts": logo_generation_attempts if logo_generation_attempts > 0 else (1 if logo_image is not None else 0),
             "design_index": 0 if variation_id is None else variation_id  # 使用design_index替代variation_id
         }
     
@@ -776,9 +882,17 @@ def show_high_recommendation_without_explanation():
                     cols = st.columns(design_count)
                     for i in range(design_count):
                         with cols[i]:
-                            design, _ = st.session_state.generated_designs[i]
+                            design, metadata = st.session_state.generated_designs[i]
                             st.markdown(f"<p style='text-align:center;'>Design {i+1}</p>", unsafe_allow_html=True)
                             st.image(design, use_container_width=True)
+                            
+                            # 显示logo生成状态
+                            if 'logo_generated' in metadata:
+                                if metadata['logo_generated']:
+                                    st.markdown("<p style='text-align:center; color:green; font-size:12px;'>✓ Logo generated</p>", unsafe_allow_html=True)
+                                else:
+                                    attempts = metadata.get('logo_attempts', 0)
+                                    st.markdown(f"<p style='text-align:center; color:orange; font-size:12px;'>⚠ Logo failed ({attempts} attempts)</p>", unsafe_allow_html=True)
                 elif design_count <= 6:
                     # 两行显示
                     row1_cols = st.columns(min(3, design_count))
@@ -788,17 +902,33 @@ def show_high_recommendation_without_explanation():
                     # 显示第一行
                     for i in range(min(3, design_count)):
                         with row1_cols[i]:
-                            design, _ = st.session_state.generated_designs[i]
+                            design, metadata = st.session_state.generated_designs[i]
                             st.markdown(f"<p style='text-align:center;'>Design {i+1}</p>", unsafe_allow_html=True)
                             st.image(design, use_container_width=True)
+                            
+                            # 显示logo生成状态
+                            if 'logo_generated' in metadata:
+                                if metadata['logo_generated']:
+                                    st.markdown("<p style='text-align:center; color:green; font-size:12px;'>✓ Logo generated</p>", unsafe_allow_html=True)
+                                else:
+                                    attempts = metadata.get('logo_attempts', 0)
+                                    st.markdown(f"<p style='text-align:center; color:orange; font-size:12px;'>⚠ Logo failed ({attempts} attempts)</p>", unsafe_allow_html=True)
                     
                     # 显示第二行
                     if design_count > 3:
                         for i in range(3, design_count):
                             with row2_cols[i-3]:
-                                design, _ = st.session_state.generated_designs[i]
+                                design, metadata = st.session_state.generated_designs[i]
                                 st.markdown(f"<p style='text-align:center;'>Design {i+1}</p>", unsafe_allow_html=True)
                                 st.image(design, use_container_width=True)
+                                
+                                # 显示logo生成状态
+                                if 'logo_generated' in metadata:
+                                    if metadata['logo_generated']:
+                                        st.markdown("<p style='text-align:center; color:green; font-size:12px;'>✓ Logo generated</p>", unsafe_allow_html=True)
+                                    else:
+                                        attempts = metadata.get('logo_attempts', 0)
+                                        st.markdown(f"<p style='text-align:center; color:orange; font-size:12px;'>⚠ Logo failed ({attempts} attempts)</p>", unsafe_allow_html=True)
                 else:
                     # 多行显示（适用于7-10个设计）
                     # 第一行：3个设计
@@ -806,18 +936,34 @@ def show_high_recommendation_without_explanation():
                         row1_cols = st.columns(3)
                         for i in range(3):
                             with row1_cols[i]:
-                                design, _ = st.session_state.generated_designs[i]
+                                design, metadata = st.session_state.generated_designs[i]
                                 st.markdown(f"<p style='text-align:center;'>Design {i+1}</p>", unsafe_allow_html=True)
                                 st.image(design, use_container_width=True)
+                                
+                                # 显示logo生成状态
+                                if 'logo_generated' in metadata:
+                                    if metadata['logo_generated']:
+                                        st.markdown("<p style='text-align:center; color:green; font-size:12px;'>✓ Logo generated</p>", unsafe_allow_html=True)
+                                    else:
+                                        attempts = metadata.get('logo_attempts', 0)
+                                        st.markdown(f"<p style='text-align:center; color:orange; font-size:12px;'>⚠ Logo failed ({attempts} attempts)</p>", unsafe_allow_html=True)
                     
                     # 第二行：3个设计
                     if design_count >= 6:
                         row2_cols = st.columns(3)
                         for i in range(3, 6):
                             with row2_cols[i-3]:
-                                design, _ = st.session_state.generated_designs[i]
+                                design, metadata = st.session_state.generated_designs[i]
                                 st.markdown(f"<p style='text-align:center;'>Design {i+1}</p>", unsafe_allow_html=True)
                                 st.image(design, use_container_width=True)
+                                
+                                # 显示logo生成状态
+                                if 'logo_generated' in metadata:
+                                    if metadata['logo_generated']:
+                                        st.markdown("<p style='text-align:center; color:green; font-size:12px;'>✓ Logo generated</p>", unsafe_allow_html=True)
+                                    else:
+                                        attempts = metadata.get('logo_attempts', 0)
+                                        st.markdown(f"<p style='text-align:center; color:orange; font-size:12px;'>⚠ Logo failed ({attempts} attempts)</p>", unsafe_allow_html=True)
                     
                     # 第三行：剩余设计（最多4个）
                     if design_count > 6:
@@ -825,18 +971,34 @@ def show_high_recommendation_without_explanation():
                         row3_cols = st.columns(min(4, remaining_designs))
                         for i in range(6, min(10, design_count)):
                             with row3_cols[i-6]:
-                                design, _ = st.session_state.generated_designs[i]
+                                design, metadata = st.session_state.generated_designs[i]
                                 st.markdown(f"<p style='text-align:center;'>Design {i+1}</p>", unsafe_allow_html=True)
                                 st.image(design, use_container_width=True)
+                                
+                                # 显示logo生成状态
+                                if 'logo_generated' in metadata:
+                                    if metadata['logo_generated']:
+                                        st.markdown("<p style='text-align:center; color:green; font-size:12px;'>✓ Logo generated</p>", unsafe_allow_html=True)
+                                    else:
+                                        attempts = metadata.get('logo_attempts', 0)
+                                        st.markdown(f"<p style='text-align:center; color:orange; font-size:12px;'>⚠ Logo failed ({attempts} attempts)</p>", unsafe_allow_html=True)
                     
                     # 如果有超过10个设计，显示第四行
                     if design_count > 10:
                         row4_cols = st.columns(design_count - 10)
                         for i in range(10, design_count):
                             with row4_cols[i-10]:
-                                design, _ = st.session_state.generated_designs[i]
+                                design, metadata = st.session_state.generated_designs[i]
                                 st.markdown(f"<p style='text-align:center;'>Design {i+1}</p>", unsafe_allow_html=True)
                                 st.image(design, use_container_width=True)
+                                
+                                # 显示logo生成状态
+                                if 'logo_generated' in metadata:
+                                    if metadata['logo_generated']:
+                                        st.markdown("<p style='text-align:center; color:green; font-size:12px;'>✓ Logo generated</p>", unsafe_allow_html=True)
+                                    else:
+                                        attempts = metadata.get('logo_attempts', 0)
+                                        st.markdown(f"<p style='text-align:center; color:orange; font-size:12px;'>⚠ Logo failed ({attempts} attempts)</p>", unsafe_allow_html=True)
                 
 
         else:
